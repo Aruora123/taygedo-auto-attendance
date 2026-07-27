@@ -55,7 +55,7 @@ Worker 使用绑定名为 `KV` 的 Cloudflare KV。可以从 `TAYGEDO_ACCOUNTS` 
 https://你的-worker.workers.dev/
 ```
 
-登录页仅 Cloudflare Worker 支持，用 `TAYGEDO_ADMIN_TOKEN` 授权。密码登录可以直接提交；验证码登录会在同一页面先发送验证码，再自动复用设备信息完成登录，并把生成的账号配置写入 KV。
+管理页仅 Cloudflare Worker 支持，用 `TAYGEDO_ADMIN_TOKEN` 授权；未配置该 Secret 时，`/login`、`/run` 和 `/status` 都会拒绝访问。密码登录可以直接提交；验证码登录会在同一页面先发送验证码，再自动复用设备信息完成登录，并把生成的账号配置写入 KV。页面下方还会显示最近一次签到结果和最近 30 次执行历史，并区分定时任务、手动运行和强制重跑。
 
 通过密码登录并写入 KV：
 
@@ -78,6 +78,14 @@ curl -H "Authorization: Bearer <TAYGEDO_ADMIN_TOKEN>" https://你的-worker.work
 ```bash
 curl -H "Authorization: Bearer <TAYGEDO_ADMIN_TOKEN>" "https://你的-worker.workers.dev/run?force=1"
 ```
+
+读取脱敏后的签到状态：
+
+```bash
+curl -H "Authorization: Bearer <TAYGEDO_ADMIN_TOKEN>" https://你的-worker.workers.dev/status
+```
+
+状态接口带有 `Cache-Control: no-store`，只返回签到统计、APP / 游戏签到明细和通知失败数量，不返回 access token、refresh token、密码、通知 URL 或 SendKey。Worker 会把这份脱敏状态保存在 KV 的 `<状态前缀>:worker-status`；默认 key 为 `taygedo:worker-status`。状态历史写入采用 best-effort，不会反过来把已完成的签到判为失败；读取时还会与 runner 的 `last-run` 比较完成时间，避免状态写入偶发失败后页面长期停留在旧结果。
 
 </details>
 
