@@ -13,9 +13,13 @@ export interface LoginActionDependencies {
     & Partial<Pick<TaygedoApi, 'loginWithPassword'>>
   generateDeviceId?: () => string
   generateDeviceIdentity?: () => DeviceIdentity
+  onStage?: (stage: LoginStage, details: LoginStageDetails) => void
   writeAccounts?: (payload: string) => Promise<void>
   writeCredentialKey?: (credentialKey: string) => Promise<void>
 }
+
+export type LoginStage = 'captcha-sent' | 'laohu-authenticated' | 'usercenter-authenticated' | 'account-written'
+export type LoginStageDetails = Record<string, string | number | boolean>
 
 export async function runLoginAction(deps: LoginActionDependencies = {}): Promise<void> {
   const env = deps.env ?? process.env
@@ -27,11 +31,14 @@ export async function runLoginAction(deps: LoginActionDependencies = {}): Promis
   if (mode === 'send-code') {
     const device = resolveDeviceIdentity(env, deps)
     await api.sendCaptcha(phone, device.deviceId)
+    deps.onStage?.('captcha-sent', {
+      deviceIdLength: device.deviceId.length,
+    })
     const devicePath = optionalEnv(env, 'TAYGEDO_LOGIN_DEVICE_ID_PATH')
     if (devicePath) {
       await writeTextFile(devicePath, `${device.deviceId}\n`)
     }
-    console.log(`验证码已发送，deviceId: ${device.deviceId}`)
+    console.log('验证码已发送，请在当前登录页面继续输入验证码。')
     return
   }
 
@@ -58,7 +65,18 @@ export async function runLoginAction(deps: LoginActionDependencies = {}): Promis
     const captcha = requireEnv(env, 'TAYGEDO_LOGIN_CAPTCHA')
     loginResult = await api.loginWithCaptcha(phone, captcha, device.deviceId)
   }
+  deps.onStage?.('laohu-authenticated', {
+    tokenLength: loginResult.token.length,
+    tokenHasWhitespace: /\s/.test(loginResult.token),
+    userIdLength: loginResult.userId.length,
+    userIdIsInteger: /^\d+$/.test(loginResult.userId),
+  })
   const userCenter = await api.userCenterLogin(loginResult.token, loginResult.userId, device.deviceId)
+  deps.onStage?.('usercenter-authenticated', {
+    accessTokenLength: userCenter.accessToken.length,
+    refreshTokenLength: userCenter.refreshToken.length,
+    uidLength: userCenter.uid.length,
+  })
   const role = await tryGetBindRole(api, userCenter.accessToken, userCenter.uid)
   const tokenUpdatedAt = shanghaiDateTime()
 
@@ -108,6 +126,9 @@ export async function runLoginAction(deps: LoginActionDependencies = {}): Promis
   else {
     await writeTextFile(accountsPath, `${payload}\n`)
   }
+  deps.onStage?.('account-written', {
+    accountCount: updatedAccounts.length,
+  })
   console.log(`账号已写入 ${accountsPath}`)
 }
 

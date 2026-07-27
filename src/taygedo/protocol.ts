@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto'
 
 export const TAYGEDO_BASE_URL = 'https://bbs-api.tajiduo.com'
-export const TAYGEDO_APP_VER = '1.2.4'
+export const TAYGEDO_APP_VER = '1.2.5'
 export const TAYGEDO_DS_SECRET = 'pUds3dfMkl'
 export const H5_ORIGIN = 'https://webstatic.tajiduo.com'
 
@@ -57,7 +57,7 @@ export function buildNativeRequest(options: NativeRequestOptions): ProtocolReque
     Accept: 'application/json',
     Authorization: options.accessToken,
     appversion: TAYGEDO_APP_VER,
-    platform: 'ios',
+    platform: 'android',
     uid: options.uid,
     deviceid: options.deviceId,
     ds: makeDs({

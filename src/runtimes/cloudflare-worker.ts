@@ -2,6 +2,7 @@ import { loadRuntimeConfig } from '../config/runtime.js'
 import { AttendanceService } from '../services/attendance-service.js'
 import { LoginService } from '../services/login-service.js'
 import { createCloudflareAccountStore, createCloudflareStateStore } from '../stores/cloudflare-factory.js'
+import { cloudflareUserCenterFetch } from './cloudflare-http1.js'
 import { TaygedoApi } from '../taygedo/api.js'
 import { generateDeviceIdentity } from '../taygedo/device.js'
 import type { LoginActionDependencies } from '../login-action.js'
@@ -50,8 +51,10 @@ const worker = {
       if (error instanceof HttpError) {
         return Response.json({ error: error.message }, { status: error.status })
       }
+      const message = error instanceof Error ? error.message : String(error)
+      console.error(`[taygedo-login] ${message}`)
       return Response.json({
-        error: error instanceof Error ? error.message : String(error),
+        error: message,
       }, { status: 502 })
     }
 
@@ -215,7 +218,6 @@ function renderManagementPage(): string {
         </div>
         <div class="toolbar">
           <button id="submit" type="submit">账号密码登录</button>
-          <button id="send-code" class="secondary hidden" type="button">发送验证码</button>
           <button id="remember" class="secondary" type="button">记住 Token</button>
         </div>
       </form>
@@ -230,10 +232,17 @@ function renderManagementPage(): string {
     const phoneInput = document.querySelector('#phone')
     const captchaInput = document.querySelector('#captcha')
     const submitButton = document.querySelector('#submit')
-    const sendCodeButton = document.querySelector('#send-code')
     const result = document.querySelector('#result')
+    const captchaSessionKey = 'taygedoCaptchaSession'
+    const captchaSessionTtlMs = 10 * 60 * 1000
+    const captchaResendSeconds = 60
     let captchaDeviceId = ''
     let captchaPhone = ''
+    let captchaSentAt = 0
+    let resendTimer = 0
+    let captchaExpiryTimer = 0
+    let resendRemaining = 0
+    let sendingCaptcha = false
     tokenInput.value = localStorage.getItem('taygedoAdminToken') || ''
 
     function syncMode() {
@@ -241,15 +250,131 @@ function renderManagementPage(): string {
       const captchaMode = mode === 'captcha'
       document.querySelector('.password-field').classList.toggle('hidden', captchaMode)
       document.querySelector('.captcha-field').classList.toggle('hidden', !captchaMode)
-      sendCodeButton.classList.toggle('hidden', !captchaMode)
       document.querySelector('#password').required = !captchaMode
-      captchaInput.required = captchaMode
-      submitButton.textContent = captchaMode ? '验证码登录' : '账号密码登录'
+      captchaInput.required = false
+      syncSubmitButton()
+    }
+
+    function clearStoredCaptchaSession() {
+      try {
+        sessionStorage.removeItem(captchaSessionKey)
+      } catch {}
     }
 
     function resetCaptchaSession() {
       captchaDeviceId = ''
       captchaPhone = ''
+      captchaSentAt = 0
+      resendRemaining = 0
+      if (resendTimer) window.clearInterval(resendTimer)
+      if (captchaExpiryTimer) window.clearTimeout(captchaExpiryTimer)
+      resendTimer = 0
+      captchaExpiryTimer = 0
+      clearStoredCaptchaSession()
+    }
+
+    function hasCaptchaSession() {
+      if (!captchaDeviceId || captchaPhone !== phoneInput.value.trim()) return false
+      const age = Date.now() - captchaSentAt
+      if (!captchaSentAt || age < 0 || age >= captchaSessionTtlMs) {
+        resetCaptchaSession()
+        return false
+      }
+      return true
+    }
+
+    function syncSubmitButton() {
+      if (modeInput.value !== 'captcha') {
+        submitButton.textContent = '账号密码登录'
+        return
+      }
+      if (sendingCaptcha) {
+        submitButton.textContent = '正在发送验证码...'
+        return
+      }
+      if (!hasCaptchaSession()) {
+        submitButton.textContent = '发送验证码'
+        return
+      }
+      submitButton.textContent = !captchaInput.value.trim() && resendRemaining <= 0
+        ? '重新发送验证码'
+        : '验证码登录'
+    }
+
+    function startResendCooldown(seconds) {
+      if (resendTimer) window.clearInterval(resendTimer)
+      resendRemaining = seconds
+      syncSubmitButton()
+      resendTimer = window.setInterval(() => {
+        resendRemaining -= 1
+        if (resendRemaining <= 0) {
+          window.clearInterval(resendTimer)
+          resendTimer = 0
+          resendRemaining = 0
+        }
+        syncSubmitButton()
+      }, 1000)
+    }
+
+    function scheduleCaptchaExpiry() {
+      if (captchaExpiryTimer) window.clearTimeout(captchaExpiryTimer)
+      const remaining = captchaSentAt + captchaSessionTtlMs - Date.now()
+      if (remaining <= 0) {
+        resetCaptchaSession()
+        return
+      }
+      captchaExpiryTimer = window.setTimeout(() => {
+        resetCaptchaSession()
+        result.className = 'result error'
+        result.textContent = '验证码已过期，请重新发送。'
+        syncSubmitButton()
+      }, remaining)
+    }
+
+    function persistCaptchaSession() {
+      try {
+        sessionStorage.setItem(captchaSessionKey, JSON.stringify({
+          deviceId: captchaDeviceId,
+          phone: captchaPhone,
+          sentAt: captchaSentAt,
+        }))
+      } catch {}
+      scheduleCaptchaExpiry()
+    }
+
+    function restoreCaptchaSession() {
+      let stored = ''
+      try {
+        stored = sessionStorage.getItem(captchaSessionKey) || ''
+      } catch {}
+      if (!stored) return false
+
+      try {
+        const parsed = JSON.parse(stored)
+        const deviceId = typeof parsed.deviceId === 'string' ? parsed.deviceId : ''
+        const phone = typeof parsed.phone === 'string' ? parsed.phone : ''
+        const sentAt = Number(parsed.sentAt)
+        const age = Date.now() - sentAt
+        if (!deviceId || !phone || !Number.isFinite(sentAt) || age < 0 || age >= captchaSessionTtlMs) {
+          clearStoredCaptchaSession()
+          return false
+        }
+
+        captchaDeviceId = deviceId
+        captchaPhone = phone
+        captchaSentAt = sentAt
+        phoneInput.value = phone
+        modeInput.value = 'captcha'
+        const cooldownRemaining = Math.ceil((sentAt + captchaResendSeconds * 1000 - Date.now()) / 1000)
+        if (cooldownRemaining > 0) startResendCooldown(cooldownRemaining)
+        scheduleCaptchaExpiry()
+        result.className = 'result ok'
+        result.textContent = '已恢复刚才发送的验证码，可继续填写并登录。'
+        return true
+      } catch {
+        clearStoredCaptchaSession()
+        return false
+      }
     }
 
     function payloadFromForm(modeOverride) {
@@ -287,37 +412,60 @@ function renderManagementPage(): string {
     }
 
     async function sendCaptcha() {
+      const requestedPhone = phoneInput.value.trim()
       result.className = 'result'
       result.textContent = '正在发送验证码...'
-      sendCodeButton.disabled = true
+      sendingCaptcha = true
+      submitButton.disabled = true
+      syncSubmitButton()
       try {
         const payload = payloadFromForm('send-code')
         const data = await requestLogin(payload)
         if (!data.deviceId) throw new Error('发送验证码后未返回设备信息，请重试。')
         captchaDeviceId = data.deviceId
         captchaPhone = payload.phone
+        captchaSentAt = Date.now()
+        persistCaptchaSession()
         result.className = 'result ok'
         result.textContent = '验证码已发送，请在上方填写短信验证码并登录。'
+        startResendCooldown(captchaResendSeconds)
         captchaInput.focus()
       } catch (error) {
-        resetCaptchaSession()
+        const hasUsableSession = Boolean(captchaDeviceId && captchaPhone === requestedPhone)
+        if (!hasUsableSession) resetCaptchaSession()
         result.className = 'result error'
-        result.textContent = error.message
+        result.textContent = error.message + (hasUsableSession ? '；刚才成功发送的验证码仍可继续登录。' : '')
       } finally {
-        sendCodeButton.disabled = false
+        sendingCaptcha = false
+        submitButton.disabled = false
+        syncSubmitButton()
       }
     }
 
     async function submitLogin(event) {
       event.preventDefault()
+      if (modeInput.value === 'captcha') {
+        if (!hasCaptchaSession()) {
+          await sendCaptcha()
+          return
+        }
+        if (!captchaInput.value.trim()) {
+          if (resendRemaining <= 0) {
+            await sendCaptcha()
+            return
+          }
+          result.className = 'result error'
+          result.textContent = '请输入短信验证码；' + resendRemaining + ' 秒后可重新发送。'
+          captchaInput.focus()
+          return
+        }
+      }
       result.className = 'result'
       result.textContent = '正在提交...'
       submitButton.disabled = true
       try {
-        if (modeInput.value === 'captcha' && (!captchaDeviceId || captchaPhone !== phoneInput.value.trim())) {
-          throw new Error('请先为当前手机号发送验证码。')
-        }
         await requestLogin(payloadFromForm())
+        resetCaptchaSession()
         result.className = 'result ok'
         result.textContent = '登录成功，账号已写入 KV。'
       } catch (error) {
@@ -325,6 +473,7 @@ function renderManagementPage(): string {
         result.textContent = error.message
       } finally {
         submitButton.disabled = false
+        syncSubmitButton()
       }
     }
 
@@ -333,7 +482,6 @@ function renderManagementPage(): string {
       result.className = 'result ok'
       result.textContent = 'Token 已保存在当前浏览器。'
     })
-    sendCodeButton.addEventListener('click', sendCaptcha)
     modeInput.addEventListener('change', () => {
       resetCaptchaSession()
       captchaInput.value = ''
@@ -343,8 +491,11 @@ function renderManagementPage(): string {
       if (captchaPhone && captchaPhone !== phoneInput.value.trim()) {
         resetCaptchaSession()
       }
+      syncSubmitButton()
     })
+    captchaInput.addEventListener('input', syncSubmitButton)
     form.addEventListener('submit', submitLogin)
+    restoreCaptchaSession()
     syncMode()
   </script>
 </body>
@@ -356,7 +507,7 @@ async function runCloudflareAttendance(env: CloudflareEnv, forceRun?: boolean) {
   const service = new AttendanceService({
     accountStore: createCloudflareAccountStore({ config, kv: env.KV }),
     stateStore: createCloudflareStateStore({ config, kv: env.KV }),
-    api: env.TAYGEDO_TEST_API ?? new TaygedoApi(),
+    api: env.TAYGEDO_TEST_API ?? createCloudflareTaygedoApi(),
     accountPasswords: config.accountPasswords,
     credentialKey: config.credentialKey,
     notificationUrls: config.notificationUrls,
@@ -383,7 +534,12 @@ async function runCloudflareLogin(request: Request, env: CloudflareEnv) {
     throw new HttpError(400, '缺少 TAYGEDO_CREDENTIAL_KEY，请先在 Cloudflare 中添加 Secret。')
   }
   const currentAccounts = await tryReadCloudflareAccounts(env, config.accountsKey, config.accountsSecret)
-  const service = new LoginService({ api: env.TAYGEDO_TEST_LOGIN_API ?? new TaygedoApi() })
+  const service = new LoginService({
+    api: env.TAYGEDO_TEST_LOGIN_API ?? createCloudflareTaygedoApi(),
+    onStage: (stage, details) => {
+      console.info(`[taygedo-login] stage=${stage} ${JSON.stringify(details)}`)
+    },
+  })
   const deviceId = body.deviceId ?? (mode === 'send-code' ? generateDeviceIdentity().deviceId : undefined)
   await service.runLogin({
     mode,
@@ -403,6 +559,10 @@ async function runCloudflareLogin(request: Request, env: CloudflareEnv) {
     accountId: body.accountId ?? 'main',
     ...(mode === 'send-code' ? { deviceId } : {}),
   }
+}
+
+function createCloudflareTaygedoApi(): TaygedoApi {
+  return new TaygedoApi({ userCenterFetch: cloudflareUserCenterFetch })
 }
 
 class HttpError extends Error {

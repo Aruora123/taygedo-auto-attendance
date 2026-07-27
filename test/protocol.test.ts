@@ -3,7 +3,7 @@ import { buildH5Request, buildNativeRequest, makeDs, nonceIndexFromByte } from '
 
 describe('taygedo protocol helpers', () => {
   it('builds a deterministic ds signature', () => {
-    expect(makeDs({ timestamp: 1770000000, nonce: 'AbCd1234' })).toBe('1770000000,AbCd1234,075ed8cda8835e64bc513485e7f20b27')
+    expect(makeDs({ timestamp: 1770000000, nonce: 'AbCd1234' })).toBe('1770000000,AbCd1234,98d886c4c3b3f68edbd335e706e66370')
     expect(makeDs({ timestamp: 1710000000, nonce: 'ABCDEFGH', appVersion: '1.2.2' })).toBe('1710000000,ABCDEFGH,6cf4e2edb3dc484539a2b8d90080c2db')
   })
 
@@ -26,11 +26,11 @@ describe('taygedo protocol helpers', () => {
       body: 'postId=post-1',
       headers: expect.objectContaining({
         Authorization: 'access-token',
-        appversion: '1.2.4',
-        platform: 'ios',
+        appversion: '1.2.5',
+        platform: 'android',
         uid: 'uid-1',
         deviceid: 'device-1',
-        ds: '1710000000,ABCDEFGH,2592757c6cbfcd972a4249014cfa1693',
+        ds: '1710000000,ABCDEFGH,21f5f0405f0c3e3bcc048bdc56db2439',
         'User-Agent': 'okhttp/4.12.0',
         'Content-Type': 'application/x-www-form-urlencoded',
       }),
