@@ -28,14 +28,16 @@
 <details>
 <summary>展开查看详细步骤</summary>
 
-部署后配置环境变量：
+部署页面只需要填写以下两个 Secret。建议分别运行一次 `openssl rand -hex 32`，生成两段不同的随机字符串：
 
 ```text
-TAYGEDO_ADMIN_TOKEN=手动触发和登录接口使用的随机字符串
-TAYGEDO_CREDENTIAL_KEY=一段随机密钥
+TAYGEDO_ADMIN_TOKEN=第一段随机字符串
+TAYGEDO_CREDENTIAL_KEY=第二段随机字符串
 ```
 
 > 安全提醒：`TAYGEDO_CREDENTIAL_KEY` 必须使用高强度随机密钥，不要使用手机号、生日、短密码或常用短语。它只需要保存在 Cloudflare Secret 中供 Worker 解密账号密码使用，不需要自己记住；丢失后重新 password 登录生成新的加密密码即可。
+
+KV 命名空间会由 Cloudflare 自动创建和绑定。账号、通知地址、重试次数等可选配置不需要在首次部署时填写；账号可以在部署完成后通过 Worker 登录页写入 KV。
 
 可选：
 
@@ -53,7 +55,7 @@ Worker 使用绑定名为 `KV` 的 Cloudflare KV。可以从 `TAYGEDO_ACCOUNTS` 
 https://你的-worker.workers.dev/
 ```
 
-登录页仅 Cloudflare Worker 支持，用 `TAYGEDO_ADMIN_TOKEN` 授权。它只用于短信验证码登录或账号密码登录，并把生成的账号配置写入 KV。
+管理页仅 Cloudflare Worker 支持，用 `TAYGEDO_ADMIN_TOKEN` 授权；未配置该 Secret 时，`/login`、`/run` 和 `/status` 都会拒绝访问。密码登录可以直接提交；验证码登录会在同一页面先发送验证码，再自动复用设备信息完成登录，并把生成的账号配置写入 KV。页面下方还会显示最近一次签到结果和最近 30 次执行历史，并区分定时任务、手动运行和强制重跑。
 
 通过密码登录并写入 KV：
 
@@ -76,6 +78,14 @@ curl -H "Authorization: Bearer <TAYGEDO_ADMIN_TOKEN>" https://你的-worker.work
 ```bash
 curl -H "Authorization: Bearer <TAYGEDO_ADMIN_TOKEN>" "https://你的-worker.workers.dev/run?force=1"
 ```
+
+读取脱敏后的签到状态：
+
+```bash
+curl -H "Authorization: Bearer <TAYGEDO_ADMIN_TOKEN>" https://你的-worker.workers.dev/status
+```
+
+状态接口带有 `Cache-Control: no-store`，只返回签到统计、APP / 游戏签到明细和通知失败数量，不返回 access token、refresh token、密码、通知 URL 或 SendKey。Worker 会把这份脱敏状态保存在 KV 的 `<状态前缀>:worker-status`；默认 key 为 `taygedo:worker-status`。状态历史写入采用 best-effort，不会反过来把已完成的签到判为失败；读取时还会与 runner 的 `last-run` 比较完成时间，避免状态写入偶发失败后页面长期停留在旧结果。
 
 </details>
 
@@ -281,13 +291,15 @@ account_name=主账号
 总账号：1，成功：1，失败：0
 ```
 
-之后 workflow 会按计划每天自动运行。
+之后 workflow 会按计划每天自动运行。定时运行时会自动调用 `liskin/gh-workflow-keepalive@v1`，防止仓库长期无活动导致 GitHub Actions 被停用，且不会产生额外的空提交。
 
 </details>
 
 ### Docker 部署
 
 适合已有服务器、NAS 或本地容器环境的用户。默认使用 GHCR 镜像，也可以本地构建。
+
+仓库中的 `.env.selfhost.example` 保留了 Docker、本地 CLI 和其他自托管方式可使用的完整环境变量示例；它不会被 Cloudflare 一键部署识别为必填 Secret。
 
 <details>
 <summary>展开查看详细步骤</summary>
@@ -671,7 +683,7 @@ Cloudflare Workers 默认使用 KV；Docker 和本地 CLI 默认使用文件存�
 - 本项目仅用于学习和研究目的。
 - 请勿频繁调用接口，以免影响账号安全。
 - 请不要把密码、token、加密密钥、账号 JSON 发到 issue、README、公开日志或聊天截图里。
-- GitHub Actions 免费额度通常够用；如果仓库长期无活动，GitHub 可能会停用定时 workflow，可手动触发或提交新 commit 恢复。
+- GitHub Actions 免费额度通常够用；GitHub 可能会停用长期无活动仓库的定时 workflow，本项目会在定时签到时通过 `liskin/gh-workflow-keepalive@v1` 自动保活，避免额外空提交。
 
 ## 致谢
 

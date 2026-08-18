@@ -1,8 +1,19 @@
 import { createCipheriv, createHash } from 'node:crypto'
-import { buildH5Request, buildNativeRequest, TAYGEDO_BASE_URL } from './protocol.js'
+import { buildH5Request, buildNativeRequest, makeDs, TAYGEDO_APP_VER, TAYGEDO_BASE_URL } from './protocol.js'
+import type { DeviceIdentity } from './device.js'
 
 const LAOHU_BASE_URL = 'https://user.laohu.com'
 const LAOHU_SECRET = '89155cc4e8634ec5b1b6364013b23e3e'
+const LAOHU_APP_ID = '10550'
+const LAOHU_CHANNEL_ID = '1'
+const LAOHU_VERSION_CODE = '17'
+const LAOHU_SDK_VERSION = '4.327.0'
+const LAOHU_DEVICE_MODEL = 'Pixel 6'
+const LAOHU_DEVICE_SYS = '14'
+const LAOHU_USER_AGENT = 'LaohuSDK/4.327.0 (android os 14;mobile  manufacturer Google; model Pixel 6) '
+const TAYGEDO_LOGIN_APP_ID = '10551'
+const TAYGEDO_COMPAT_APP_VERSION = '1.1.0'
+const TAYGEDO_COMPAT_UID = '10000000'
 const CLOUD_APP_ID = '10597'
 const CLOUD_APP_KEY = 'f1b7f11fc3774f898e387368cce4da04'
 const CLOUD_CHANNEL_ID = '9'
@@ -29,6 +40,8 @@ export interface UserCenterLoginResponse {
 
 export interface TaygedoApiOptions {
   fetch?: typeof fetch
+  userCenterFetch?: typeof fetch
+  logger?: Pick<Console, 'info' | 'warn'>
 }
 
 export interface BindRoleResponse {
@@ -75,34 +88,31 @@ export interface CloudDurationResponse {
 
 export class TaygedoApi {
   private readonly fetchImpl: typeof fetch
+  private readonly userCenterFetchImpl: typeof fetch
+  private readonly logger: Pick<Console, 'info' | 'warn'>
 
   constructor(options: TaygedoApiOptions = {}) {
-    this.fetchImpl = options.fetch ?? fetch
+    // Workerd requires the platform fetch function to keep globalThis as its
+    // receiver. Wrapping it avoids an "Illegal invocation" when this client
+    // stores and later calls the function as a class field.
+    this.fetchImpl = options.fetch ?? ((input, init) => globalThis.fetch(input, init))
+    this.userCenterFetchImpl = options.userCenterFetch ?? this.fetchImpl
+    this.logger = options.logger ?? console
   }
 
   async sendCaptcha(phone: string, deviceId: string): Promise<void> {
     const body = signedLaohuBody({
-      deviceType: 'LGE-AN10',
-      type: '16',
-      deviceId,
-      deviceName: 'LGE-AN10',
-      versionCode: '1',
-      t: String(Math.floor(Date.now() / 1000)),
+      ...laohuAndroidBaseParams(deviceId, String(Math.floor(Date.now() / 1000)), 'versionCode'),
       areaCodeId: '1',
-      appId: '10550',
-      deviceSys: '12',
       cellphone: phone,
-      deviceModel: 'LGE-AN10',
-      sdkVersion: '4.129.0',
-      bid: 'com.pwrd.htassistant',
-      channelId: '1',
-    })
+      type: '16',
+    }, { includeEmpty: false })
 
     const response = await this.fetchImpl(`${LAOHU_BASE_URL}/m/newApi/sendPhoneCaptchaWithOutLogin`, {
       method: 'POST',
       headers: {
-        platform: 'android',
-        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+        'User-Agent': LAOHU_USER_AGENT,
       },
       body,
     })
@@ -113,33 +123,26 @@ export class TaygedoApi {
       msg?: string
     }
 
-    if (!response.ok || data.code !== 0) {
+    const sendingAlreadyAccepted = response.status === 200
+      && data.code === 1
+      && [data.message, data.msg].some(message => typeof message === 'string' && message.includes('短信正在发送'))
+    if (!response.ok || (data.code !== 0 && !sendingAlreadyAccepted)) {
       throw apiResponseError('sendCaptcha', response, data, '发送短信验证码请求失败')
     }
   }
 
   async checkCaptcha(phone: string, captcha: string, deviceId: string): Promise<void> {
     const body = signedLaohuBody({
-      deviceType: 'LGE-AN10',
-      deviceId,
-      deviceName: 'LGE-AN10',
-      t: String(Math.floor(Date.now() / 1000)),
-      areaCodeId: '1',
-      appId: '10550',
-      deviceSys: '12',
-      cellphone: phone,
+      ...laohuAndroidBaseParams(deviceId, String(Math.floor(Date.now() / 1000)), 'versionCode'),
       captcha,
-      deviceModel: 'LGE-AN10',
-      sdkVersion: '4.129.0',
-      bid: 'com.pwrd.htassistant',
-      channelId: '1',
-    })
+      cellphone: phone,
+    }, { includeEmpty: false })
 
     const response = await this.fetchImpl(`${LAOHU_BASE_URL}/m/newApi/checkPhoneCaptchaWithOutLogin`, {
       method: 'POST',
       headers: {
-        platform: 'android',
-        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+        'User-Agent': LAOHU_USER_AGENT,
       },
       body,
     })
@@ -151,140 +154,123 @@ export class TaygedoApi {
     }
 
     if (!response.ok || data.code !== 0) {
-      throw apiResponseError('checkCaptcha', response, data, '校验短信验证码请求失败')
+      throw apiResponseError('checkCaptcha', response, data, '短信验证码校验请求失败')
     }
   }
 
   async loginWithCaptcha(phone: string, captcha: string, deviceId: string): Promise<LoginWithCaptchaResponse> {
+    await this.checkCaptcha(phone, captcha, deviceId)
+
     const body = signedLaohuBody({
-      deviceType: 'LGE-AN10',
-      idfa: '',
-      sign: '',
-      adm: '',
-      type: '16',
-      deviceId,
-      version: '1',
-      deviceName: 'LGE-AN10',
-      mac: '',
-      t: String(Date.now()),
+      ...laohuAndroidBaseParams(deviceId, String(Date.now()), 'version'),
       areaCodeId: '1',
       captcha: aesBase64Encode(captcha),
-      appId: '10550',
-      deviceSys: '12',
       cellphone: aesBase64Encode(phone),
-      deviceModel: 'LGE-AN10',
-      sdkVersion: '4.129.0',
-      bid: 'com.pwrd.htassistant',
-      channelId: '1',
-    })
+      type: '16',
+    }, { includeEmpty: true })
 
     const response = await this.fetchImpl(`${LAOHU_BASE_URL}/openApi/sms/new/login`, {
       method: 'POST',
       headers: {
-        platform: 'android',
-        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+        'User-Agent': LAOHU_USER_AGENT,
       },
       body,
     })
 
-    const data = await readJson(response, 'loginWithCaptcha') as {
+    const data = await readJson(response, 'loginWithCaptcha', { preserveIntegerFields: ['userId'] }) as {
       code?: number
       message?: string
       msg?: string
       result?: {
         token?: string
-        userId?: string | number
+        userId?: string | number | null
       }
     }
 
-    if (!response.ok || data.code !== 0 || !data.result?.token || data.result.userId === undefined) {
+    const userId = normalizeLaohuUserId(data.result?.userId)
+    if (!response.ok || data.code !== 0 || !data.result?.token || !userId) {
       throw apiResponseError('loginWithCaptcha', response, data, '短信验证码登录请求失败')
     }
 
     return {
       token: data.result.token,
-      userId: String(data.result.userId),
+      userId,
     }
   }
 
-  async loginWithPassword(phone: string, password: string, deviceId: string): Promise<LoginWithCaptchaResponse> {
+  async loginWithPassword(
+    phone: string,
+    password: string,
+    deviceId: string,
+    device: Partial<Pick<DeviceIdentity, 'openudid' | 'vendorid'>> = {},
+  ): Promise<LoginWithCaptchaResponse> {
+    void device
     const body = signedLaohuBody({
-      deviceType: 'LGE-AN10',
-      idfa: '',
-      sign: '',
-      adm: '',
-      deviceId,
-      version: '1',
-      deviceName: 'LGE-AN10',
-      mac: '',
-      t: String(Date.now()),
-      appId: '10550',
-      deviceSys: '12',
-      username: aesBase64Encode(phone),
+      ...laohuAndroidBaseParams(deviceId, String(Date.now()), 'version'),
       password: aesBase64Encode(password),
-      deviceModel: 'LGE-AN10',
-      sdkVersion: '4.129.0',
-      bid: 'com.pwrd.htassistant',
-      channelId: '1',
-    })
+      username: aesBase64Encode(phone),
+    }, { includeEmpty: true })
 
     const response = await this.fetchImpl(`${LAOHU_BASE_URL}/openApi/secureLogin`, {
       method: 'POST',
       headers: {
-        platform: 'android',
-        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+        'User-Agent': LAOHU_USER_AGENT,
+        'robot-auth-type': '2',
       },
       body,
     })
 
-    const data = await readJson(response, 'loginWithPassword') as {
+    const data = await readJson(response, 'loginWithPassword', { preserveIntegerFields: ['userId'] }) as {
       code?: number
       message?: string
       msg?: string
       result?: {
         token?: string
-        userId?: string | number
+        userId?: string | number | null
       }
     }
 
-    if (!response.ok || data.code !== 0 || !data.result?.token || data.result.userId === undefined) {
+    const userId = normalizeLaohuUserId(data.result?.userId)
+    if (!response.ok || data.code !== 0 || !data.result?.token || !userId) {
       throw apiResponseError('loginWithPassword', response, data, '账号密码登录请求失败')
     }
 
     return {
       token: data.result.token,
-      userId: String(data.result.userId),
+      userId,
     }
   }
 
   async userCenterLogin(token: string, userId: string, deviceId: string): Promise<UserCenterLoginResponse> {
-    const response = await this.fetchImpl(`${TAYGEDO_BASE_URL}/usercenter/api/login`, {
-      method: 'POST',
-      headers: {
-        platform: 'android',
-        deviceid: deviceId,
-        authorization: '',
-        appversion: '1.1.0',
-        uid: '10000000',
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'User-Agent': 'okhttp/4.12.0',
-      },
-      body: formEncode({
-        token,
-        userIdentity: userId,
-        appId: '10551',
-      }),
-    })
-
-    const data = await readJson(response, 'userCenterLogin') as {
-      code?: number
-      msg?: string
-      data?: {
-        accessToken?: string
-        refreshToken?: string
-        uid?: string | number
+    let attempt = await requestUserCenterLogin(this.userCenterFetchImpl, token, userId, deviceId, 'official')
+    safeLog(
+      this.logger,
+      'info',
+      `[taygedo-login] userCenterLogin profile=official HTTP=${attempt.response.status} code=${safeBusinessCode(attempt.data.code)}`,
+    )
+    if (isTransientUserCenterLoginError(attempt.response, attempt.data)) {
+      try {
+        const compatAttempt = await requestUserCenterLogin(this.userCenterFetchImpl, token, userId, deviceId, 'compat-1.1.0')
+        safeLog(
+          this.logger,
+          'info',
+          `[taygedo-login] userCenterLogin profile=compat-1.1.0 HTTP=${compatAttempt.response.status} code=${safeBusinessCode(compatAttempt.data.code)}`,
+        )
+        if (compatAttempt.response.ok && compatAttempt.data.code === 0) {
+          attempt = compatAttempt
+        }
+      }
+      catch {
+        safeLog(
+          this.logger,
+          'warn',
+          '[taygedo-login] userCenterLogin profile=compat-1.1.0 unavailable',
+        )
       }
     }
+    const { response, data } = attempt
 
     if (!response.ok || data.code !== 0 || !data.data?.accessToken || !data.data.refreshToken || data.data.uid === undefined) {
       throw apiResponseError('userCenterLogin', response, data, '塔吉多用户中心登录请求失败')
@@ -298,7 +284,7 @@ export class TaygedoApi {
   }
 
   async refreshToken(refreshToken: string, deviceId: string): Promise<RefreshTokenResponse> {
-    const response = await this.fetchImpl(`${TAYGEDO_BASE_URL}/usercenter/api/refreshToken`, {
+    const response = await this.userCenterFetchImpl(`${TAYGEDO_BASE_URL}/usercenter/api/refreshToken`, {
       method: 'POST',
       headers: {
         authorization: refreshToken,
@@ -733,17 +719,93 @@ export class TaygedoApi {
   }
 }
 
-function signedLaohuBody(data: Record<string, string>): string {
-  const withSign = {
-    ...data,
-    sign: laohuSign(data),
+interface UserCenterLoginPayload {
+  code?: number
+  msg?: string
+  message?: string
+  data?: {
+    accessToken?: string
+    refreshToken?: string
+    uid?: string | number
   }
-  return formEncode(withSign)
 }
 
-function laohuSign(data: Record<string, string>): string {
+type UserCenterLoginProfile = 'official' | 'compat-1.1.0'
+
+async function requestUserCenterLogin(
+  fetchImpl: typeof fetch,
+  token: string,
+  userIdentity: string,
+  deviceId: string,
+  profile: UserCenterLoginProfile,
+): Promise<{ response: Response, data: UserCenterLoginPayload }> {
+  const headers: Record<string, string> = profile === 'official'
+    ? {
+        Accept: 'application/json, text/plain, */*',
+        Authorization: '',
+        appVersion: TAYGEDO_APP_VER,
+        platform: 'android',
+        uid: '0',
+        'debug-uid': '3',
+        deviceId,
+        ds: makeDs(),
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'User-Agent': 'okhttp/4.12.0',
+      }
+    : {
+        authorization: '',
+        appversion: TAYGEDO_COMPAT_APP_VERSION,
+        platform: 'android',
+        uid: TAYGEDO_COMPAT_UID,
+        deviceid: deviceId,
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'User-Agent': 'okhttp/4.12.0',
+      }
+  const response = await fetchImpl(`${TAYGEDO_BASE_URL}/usercenter/api/login`, {
+    method: 'POST',
+    headers,
+    body: formEncode({
+      token,
+      userIdentity,
+      appId: TAYGEDO_LOGIN_APP_ID,
+    }),
+  })
+  const data = await readJson(response, 'userCenterLogin') as UserCenterLoginPayload
+  return { response, data }
+}
+
+function isTransientUserCenterLoginError(response: Response, data: UserCenterLoginPayload): boolean {
+  return response.ok && data.code === 1 && (data.message ?? data.msg)?.trim() === '系统错误'
+}
+
+function safeBusinessCode(code: unknown): string {
+  return typeof code === 'number' && Number.isFinite(code) ? String(code) : 'unknown'
+}
+
+function safeLog(logger: Pick<Console, 'info' | 'warn'>, level: 'info' | 'warn', message: string): void {
+  try {
+    logger[level](message)
+  }
+  catch {
+    // Compatibility logging must never replace the original upstream error.
+  }
+}
+
+function signedLaohuBody(
+  data: Record<string, string>,
+  options: { includeEmpty: boolean },
+  secret = LAOHU_SECRET,
+): string {
+  const withSign = {
+    ...data,
+    sign: laohuSign(data, secret),
+  }
+  return options.includeEmpty ? formEncode(withSign) : formEncodeNonEmpty(withSign)
+}
+
+function laohuSign(data: Record<string, string>, secret = LAOHU_SECRET): string {
   const values = Object.keys(data).sort().map(key => data[key]).join('')
-  return createHash('md5').update(`${values}${LAOHU_SECRET}`, 'utf8').digest('hex')
+  return createHash('md5').update(`${values}${secret}`, 'utf8').digest('hex')
 }
 
 function signedCloudBody(data: Record<string, string>): string {
@@ -759,29 +821,86 @@ function cloudSign(data: Record<string, string>): string {
   return createHash('md5').update(`${values}${CLOUD_APP_KEY}`, 'utf8').digest('hex')
 }
 
-function aesBase64Encode(value: string): string {
-  const key = Buffer.from(LAOHU_SECRET.slice(-16), 'utf8')
-  const cipher = createCipheriv('aes-128-ecb', key, null)
+function aesBase64Encode(value: string, secret = LAOHU_SECRET): string {
+  const key = Buffer.from(secret.slice(-16), 'utf8')
+  // ECB does not use an IV. Workerd's node:crypto compatibility layer rejects
+  // null here even though Node.js accepts it, while a zero-length buffer works
+  // in both runtimes and still represents "no IV".
+  const cipher = createCipheriv('aes-128-ecb', key, Buffer.alloc(0))
   cipher.setAutoPadding(true)
   return Buffer.concat([cipher.update(value, 'utf8'), cipher.final()]).toString('base64')
+}
+
+function laohuAndroidBaseParams(
+  deviceId: string,
+  timestamp: string,
+  versionField: 'version' | 'versionCode',
+): Record<string, string> {
+  const base = {
+    adm: '',
+    appId: LAOHU_APP_ID,
+    bid: 'com.pwrd.htassistant',
+    channelId: LAOHU_CHANNEL_ID,
+    deviceId,
+    deviceModel: LAOHU_DEVICE_MODEL,
+    deviceName: LAOHU_DEVICE_MODEL,
+    deviceSys: LAOHU_DEVICE_SYS,
+    deviceType: LAOHU_DEVICE_MODEL,
+    idfa: '',
+    sdkVersion: LAOHU_SDK_VERSION,
+    t: timestamp,
+  }
+  if (versionField === 'versionCode') {
+    return { ...base, imei: '', versionCode: LAOHU_VERSION_CODE }
+  }
+  return { ...base, mac: '', version: LAOHU_VERSION_CODE }
+}
+
+function normalizeLaohuUserId(userId: string | number | null | undefined): string | undefined {
+  const value = userId === null || userId === undefined ? '' : String(userId).trim()
+  return value || undefined
 }
 
 function formEncode(data: Record<string, string>): string {
   return new URLSearchParams(data).toString()
 }
 
-async function readJson(response: Response, endpointName: string): Promise<unknown> {
+function formEncodeNonEmpty(data: Record<string, string>): string {
+  const params = new URLSearchParams()
+  for (const [key, value] of Object.entries(data)) {
+    if (value !== '') {
+      params.set(key, value)
+    }
+  }
+  return params.toString()
+}
+
+async function readJson(
+  response: Response,
+  endpointName: string,
+  options: { preserveIntegerFields?: string[] } = {},
+): Promise<unknown> {
   const text = await response.text()
   if (!text.trim()) {
     throw new Error(`${endpointName} 返回了无效 JSON（HTTP ${response.status}，响应为空）`)
   }
 
   try {
-    return JSON.parse(text) as unknown
+    const losslessText = (options.preserveIntegerFields ?? []).reduce(
+      (current, field) => quoteJsonIntegerField(current, field),
+      text,
+    )
+    return JSON.parse(losslessText) as unknown
   }
   catch {
     throw new Error(`${endpointName} 返回了无效 JSON（HTTP ${response.status}，响应：${summarizeResponse(text)}）`)
   }
+}
+
+function quoteJsonIntegerField(text: string, field: string): string {
+  const escapedField = field.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const pattern = new RegExp(`("${escapedField}"\\s*:\\s*)(-?\\d+)(?=\\s*[,}])`, 'g')
+  return text.replace(pattern, '$1"$2"')
 }
 
 function summarizeResponse(text: string): string {
@@ -796,10 +915,10 @@ function apiResponseError(
   fallback: string,
 ): Error {
   const msg = (data.message ?? data.msg)?.trim()
-  if (msg && msg.toLowerCase() !== 'ok') {
-    return new Error(msg)
-  }
   const code = data.code === undefined ? 'unknown' : String(data.code)
+  if (msg && msg.toLowerCase() !== 'ok') {
+    return new Error(`${endpointName}：${msg}（HTTP ${response.status}，code=${code}）`)
+  }
   const msgText = msg ? `，msg=${msg}` : ''
   return new Error(`${endpointName} 请求失败（HTTP ${response.status}，code=${code}${msgText}，响应：${summarizeResponse(JSON.stringify(data))}）`)
 }
